@@ -20,8 +20,8 @@
     "url": "git+https://github.com/williamjeong2/agent-gc.git"
   },
   "bin": {
-    "agent-gc": "./bin/agent-gc.js",
-    "ag": "./bin/ag.js"
+    "agent-gc": "bin/agent-gc.js",
+    "ag": "bin/ag.js"
   },
   "engines": {
     "node": ">=14"
