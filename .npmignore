@@ -1,0 +1,4 @@
+LOCAL_NOTES.md
+target/
+.omx/
+.DS_Store

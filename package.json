@@ -1,0 +1,45 @@
+{
+  "name": "agent-gc",
+  "version": "0.1.0",
+  "description": "AI agent worktree and dev artifact garbage collector",
+  "keywords": [
+    "rust",
+    "tui",
+    "cli",
+    "codex",
+    "claude-code",
+    "opencode",
+    "disk-cleanup"
+  ],
+  "homepage": "https://github.com/williamjeong2/agent-gc#readme",
+  "bugs": {
+    "url": "https://github.com/williamjeong2/agent-gc/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/williamjeong2/agent-gc.git"
+  },
+  "bin": {
+    "agent-gc": "./bin/agent-gc.js",
+    "ag": "./bin/ag.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin",
+    "vendor",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "cargo build --release",
+    "smoke": "node bin/agent-gc.js scan --json ."
+  },
+  "license": "MIT"
+}

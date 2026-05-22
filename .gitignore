@@ -1,0 +1,5 @@
+/target
+.DS_Store
+.omx/
+*.tgz
+LOCAL_NOTES.md
