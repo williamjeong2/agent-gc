@@ -2,7 +2,7 @@
 
 > A lightweight Rust TUI for cleaning up AI coding agent worktrees, duplicate dependencies, and build artifacts.
 
-`agent-gc` helps developers reclaim disk space left behind by tools like Codex, Claude Code, OpenCode, and ordinary local development workflows. It is inspired by the simplicity of `npkill`, but focuses on agent-generated worktrees and safer cleanup decisions.
+`agent-gc` helps developers reclaim disk space left behind by tools like Codex, Claude Code, OpenCode, Cursor, and ordinary local development workflows. It is inspired by the simplicity of `npkill`, but focuses on agent-generated worktrees and safer cleanup decisions.
 
 ```bash
 npx agent-gc
@@ -41,25 +41,37 @@ General disk cleaners can find large folders, but they usually do not understand
 
 ## Features
 
-- Fast keyboard-first TUI
+- Fast keyboard-first TUI (vim `j`/`k` supported)
 - Scans common AI agent and developer project paths
 - Detects dependency folders, build outputs, and language caches
-- Groups Codex, Claude Code, and OpenCode paths as agent-related candidates
+- Marker-aware classification (`target` needs `Cargo.toml`; bare `env` needs venv markers)
+- Groups Codex, Claude Code, OpenCode, Cursor, Gemini, and Aider paths as agent-related candidates
 - Calculates size, last modified time, category, risk level, project name, git cleanliness, and dangerous file presence
 - Locks dangerous candidates so they cannot be selected or deleted
-- Supports dry-run CLI cleanup for scripts
+- Partial-delete reporting (successful deletes are marked even if some paths fail)
+- CLI dry-run, presets, and non-interactive `--yes`
 - Ships as a small npm wrapper around a native Rust binary
 
 ## Status
 
-`agent-gc` is early MVP software.
+`agent-gc` is early software (0.2.x).
 
-The current npm package ships a macOS arm64 binary only. Other platforms will be added once release binaries are available.
+Published npm packages currently include a **macOS arm64** vendor binary by default. Other platforms can build from source and use `scripts/vendor-current.sh`.
 
 ```text
-Supported now: macOS arm64
-Planned:       macOS x64, Linux x64, Linux arm64
+Vendor binary shipped today: macOS arm64
+Wrapper also looks for:      macOS x64, Linux x64, Linux arm64
+From source:                 cargo build --release
 ```
+
+### 0.2 highlights
+
+- Safer classification (fewer false positives)
+- Skip `.git` / VCS dirs; cache git status per project
+- TUI accepts scan paths; category/risk/min-size filters; multi-mode sort
+- CLI presets: `safe`, `agent-only`, `older` + `--older-than`
+- CLI `--yes` for scripts; non-TTY delete refused without it
+- RELEASABLE metric excludes already-deleted rows
 
 ## Install
 
@@ -87,10 +99,11 @@ cargo run
 
 ## Usage
 
-Open the TUI:
+Open the TUI (optional paths):
 
 ```bash
 agent-gc
+agent-gc ~/dev ~/.codex/worktrees
 ```
 
 Scan in CLI mode:
@@ -106,13 +119,16 @@ Preview cleanup without deleting anything:
 
 ```bash
 agent-gc clean --dry-run --preset safe
+agent-gc clean --dry-run --preset agent-only
+agent-gc clean --dry-run --preset older --older-than 30d
 agent-gc clean --dry-run --preset safe --category node --min-size 1GB
 ```
 
-Delete selected safe artifacts from CLI mode after confirmation:
+Delete selected safe artifacts after confirmation, or non-interactively:
 
 ```bash
 agent-gc clean --preset safe
+agent-gc clean --preset safe --yes
 ```
 
 CLI category filters:
@@ -127,26 +143,36 @@ cache
 other
 ```
 
+CLI presets:
+
+```text
+safe         SAFE risk only
+agent-only   SAFE agent / agent-cache paths
+older        SAFE items older than --older-than (default 30d)
+```
+
 ## TUI Controls
 
 ```text
-↑ / ↓     move
-Space     select / unselect
-a         add visible SAFE items
-d         delete selected items
-f         change category filter
-s         toggle size sort direction
-Enter     detail view
-r         rescan
-q         quit
-Ctrl-C    quit
+↑ / ↓ / j / k   move
+Space           select / unselect
+a               add visible SAFE items
+d               delete selected items
+f               category filter
+t               risk filter
+m               min-size filter (off → 10MB → 100MB → 1GB)
+s               sort cycle (SIZE ↓/↑, AGE ↓/↑, PATH, RISK)
+Enter           detail view
+r               rescan
+q               quit
+Ctrl-C          quit
 ```
 
-Deleted rows stay visible in the table and show `DEL` in the `Sel` column. The top metrics keep the original `RELEASABLE` total separate from the accumulated `DELETED` total.
+Deleted rows stay visible and show `DEL` in the `Sel` column. `RELEASABLE` is the sum of non-deleted candidates; `DELETED` accumulates reclaimed bytes.
 
 ## Default Scan Paths
 
-On macOS, `agent-gc` scans these paths by default when they exist:
+When no paths are given, `agent-gc` scans these locations if they exist:
 
 ```text
 ~/.codex/worktrees
@@ -154,6 +180,9 @@ On macOS, `agent-gc` scans these paths by default when they exist:
 ~/.opencode
 ~/.config/opencode
 ~/.cache/opencode
+~/.cursor
+~/.gemini
+~/.aider
 ~/dev
 ~/workspace
 ~/projects
@@ -163,6 +192,7 @@ You can also pass explicit paths:
 
 ```bash
 agent-gc scan ~/dev ~/workspace ~/.codex/worktrees
+agent-gc ~/dev
 ```
 
 ## Detected Artifacts
@@ -171,20 +201,22 @@ agent-gc scan ~/dev ~/workspace ~/.codex/worktrees
 node_modules
 .next
 .turbo
-dist
-build
-coverage
+dist          (project marker required)
+build         (project marker required)
+coverage      (project marker required)
 .vite
 .cache
 .venv
 venv
-env
+env           (python venv markers required)
 __pycache__
 .pytest_cache
 .mypy_cache
 .ruff_cache
-target
+target        (Cargo.toml ancestor required)
 ```
+
+VCS directories (`.git`, `.svn`, `.hg`, `.jj`) and `.Trash` are skipped while walking.
 
 ## Safety Model
 
@@ -196,7 +228,9 @@ CAUTION  selectable with Space only
 DANGER   locked; cannot be selected or deleted
 ```
 
-Dangerous local files such as `.env`, local databases, uploads, secrets, and key files make a candidate `DANGER`. Deletion always requires an explicit confirmation prompt.
+Dangerous local files such as `.env`, local databases, uploads, secrets, and key files make a candidate `DANGER`. Template env files (`.env.example`, `.env.sample`, `.env.template`, `.env.test`) are allowed.
+
+Deletion always requires an explicit confirmation prompt in interactive mode. Use `--yes` only in trusted automation. Partial failures report which paths failed and still mark successful deletes.
 
 ## Development
 
@@ -214,15 +248,22 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+Vendor the current host binary for the npm wrapper:
+
+```bash
+./scripts/vendor-current.sh
+# or
+npm run vendor
+```
+
 Test the npm wrapper locally:
 
 ```bash
 cargo build --release
-mkdir -p vendor
-cp target/release/agent-gc vendor/agent-gc-darwin-arm64
-chmod 755 vendor/agent-gc-darwin-arm64
+./scripts/vendor-current.sh
 node bin/agent-gc.js --help
 node bin/ag.js --help
+node bin/agent-gc.js scan --json .
 ```
 
 Inspect the npm package contents:

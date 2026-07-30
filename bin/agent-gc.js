@@ -36,9 +36,19 @@ function findBinary() {
   return null;
 }
 
+var platform = platformName();
 var bin = findBinary();
 if (!bin) {
-  console.error("agent-gc binary not found. Run `cargo build --release` or install a package with vendor binaries.");
+  console.error(
+    "agent-gc binary not found for " +
+      platform +
+      ".\n" +
+      "Tried:\n  - vendor/agent-gc-" +
+      platform +
+      "\n  - target/release/agent-gc\n  - target/debug/agent-gc\n\n" +
+      "From source:\n  cargo build --release\n  ./scripts/vendor-current.sh\n\n" +
+      "Or install a release package that includes your platform binary."
+  );
   process.exit(1);
 }
 

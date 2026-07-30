@@ -1,6 +1,6 @@
 {
   "name": "agent-gc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI agent worktree and dev artifact garbage collector",
   "keywords": [
     "rust",
@@ -27,18 +27,22 @@
     "node": ">=14"
   },
   "os": [
-    "darwin"
+    "darwin",
+    "linux"
   ],
   "cpu": [
-    "arm64"
+    "arm64",
+    "x64"
   ],
   "files": [
     "bin",
     "vendor",
-    "README.md"
+    "README.md",
+    "scripts/vendor-current.sh"
   ],
   "scripts": {
     "build": "cargo build --release",
+    "vendor": "bash scripts/vendor-current.sh",
     "smoke": "node bin/agent-gc.js scan --json ."
   },
   "license": "MIT"

@@ -18,7 +18,7 @@ use ratatui::widgets::{
 };
 use ratatui::Terminal;
 use std::collections::HashSet;
-use std::io;
+use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -29,23 +29,60 @@ const SEARCH_BAR_LABEL: &str = "Scanning ";
 const SEARCH_BAR_PULSE_WIDTH: usize = 7;
 const UI_TICK_MS: u64 = 80;
 
+const MIN_SIZE_STEPS: [Option<u64>; 4] = [
+    None,
+    Some(10_000_000),
+    Some(100_000_000),
+    Some(1_000_000_000),
+];
+
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    active: bool,
+}
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+        Ok(Self {
+            terminal,
+            active: true,
+        })
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+        &mut self.terminal
+    }
+
+    fn restore(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
 pub fn run(paths: Vec<PathBuf>) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    let result = run_app(&mut terminal, paths);
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    let mut guard = TerminalGuard::new()?;
+    let result = run_app(guard.terminal_mut(), paths);
+    guard.restore();
     result
 }
 
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    paths: Vec<PathBuf>,
-) -> Result<()> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, paths: Vec<PathBuf>) -> Result<()> {
     let mut app = App::new(paths)?;
 
     loop {
@@ -60,7 +97,7 @@ fn run_app(
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('d') => {
-                        app.delete_selected()?;
+                        app.delete_selected();
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
                         app.confirm_delete = false
@@ -96,6 +133,8 @@ fn run_app(
                 KeyCode::Char(' ') => app.toggle_selected(),
                 KeyCode::Char('a') => app.select_all_safe(),
                 KeyCode::Char('f') => app.next_filter(),
+                KeyCode::Char('t') => app.next_risk_filter(),
+                KeyCode::Char('m') => app.next_min_size(),
                 KeyCode::Char('s') => app.next_sort(),
                 KeyCode::Char('r') => app.rescan(),
                 KeyCode::Enter => app.detail = !app.detail,
@@ -134,14 +173,19 @@ struct App {
     confirm_delete: bool,
     message: Option<String>,
     filter: CategoryFilter,
+    risk_filter: RiskFilter,
+    min_size: Option<u64>,
+    min_size_index: usize,
     sort_mode: SortMode,
     focus_pinned_by_user: bool,
+    scan_errors: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CategoryFilter {
     All,
     Agent,
+    AgentCache,
     Node,
     Python,
     Rust,
@@ -154,6 +198,7 @@ impl CategoryFilter {
         match self {
             CategoryFilter::All => "ALL",
             CategoryFilter::Agent => "AGENT",
+            CategoryFilter::AgentCache => "AGENT_CACHE",
             CategoryFilter::Node => "NODE",
             CategoryFilter::Python => "PYTHON",
             CategoryFilter::Rust => "RUST",
@@ -165,7 +210,8 @@ impl CategoryFilter {
     fn next(self) -> Self {
         match self {
             CategoryFilter::All => CategoryFilter::Agent,
-            CategoryFilter::Agent => CategoryFilter::Node,
+            CategoryFilter::Agent => CategoryFilter::AgentCache,
+            CategoryFilter::AgentCache => CategoryFilter::Node,
             CategoryFilter::Node => CategoryFilter::Python,
             CategoryFilter::Python => CategoryFilter::Rust,
             CategoryFilter::Rust => CategoryFilter::Cache,
@@ -177,13 +223,12 @@ impl CategoryFilter {
     fn matches(self, artifact: &Artifact) -> bool {
         match self {
             CategoryFilter::All => true,
-            CategoryFilter::Agent => artifact.category.starts_with("AGENT"),
+            CategoryFilter::Agent => artifact.category == "AGENT",
+            CategoryFilter::AgentCache => artifact.category == "AGENT_CACHE",
             CategoryFilter::Node => artifact.category == "NODE",
             CategoryFilter::Python => artifact.category == "PY",
             CategoryFilter::Rust => artifact.category == "RUST",
-            CategoryFilter::Cache => {
-                artifact.category == "CACHE" || artifact.category == "AGENT_CACHE"
-            }
+            CategoryFilter::Cache => artifact.category == "CACHE",
             CategoryFilter::Other => !matches!(
                 artifact.category.as_str(),
                 "AGENT" | "AGENT_CACHE" | "NODE" | "PY" | "RUST" | "CACHE"
@@ -193,9 +238,50 @@ impl CategoryFilter {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RiskFilter {
+    All,
+    Safe,
+    Caution,
+    Danger,
+}
+
+impl RiskFilter {
+    fn label(self) -> &'static str {
+        match self {
+            RiskFilter::All => "ALL",
+            RiskFilter::Safe => "SAFE",
+            RiskFilter::Caution => "CAUTION",
+            RiskFilter::Danger => "DANGER",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            RiskFilter::All => RiskFilter::Safe,
+            RiskFilter::Safe => RiskFilter::Caution,
+            RiskFilter::Caution => RiskFilter::Danger,
+            RiskFilter::Danger => RiskFilter::All,
+        }
+    }
+
+    fn matches(self, artifact: &Artifact) -> bool {
+        match self {
+            RiskFilter::All => true,
+            RiskFilter::Safe => artifact.risk_level == RiskLevel::Safe,
+            RiskFilter::Caution => artifact.risk_level == RiskLevel::Caution,
+            RiskFilter::Danger => artifact.risk_level == RiskLevel::Danger,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortMode {
     SizeDesc,
     SizeAsc,
+    AgeDesc,
+    AgeAsc,
+    Path,
+    Risk,
 }
 
 impl SortMode {
@@ -203,13 +289,21 @@ impl SortMode {
         match self {
             SortMode::SizeDesc => "SIZE ↓",
             SortMode::SizeAsc => "SIZE ↑",
+            SortMode::AgeDesc => "AGE ↓",
+            SortMode::AgeAsc => "AGE ↑",
+            SortMode::Path => "PATH",
+            SortMode::Risk => "RISK",
         }
     }
 
     fn next(self) -> Self {
         match self {
             SortMode::SizeDesc => SortMode::SizeAsc,
-            SortMode::SizeAsc => SortMode::SizeDesc,
+            SortMode::SizeAsc => SortMode::AgeDesc,
+            SortMode::AgeDesc => SortMode::AgeAsc,
+            SortMode::AgeAsc => SortMode::Path,
+            SortMode::Path => SortMode::Risk,
+            SortMode::Risk => SortMode::SizeDesc,
         }
     }
 }
@@ -238,8 +332,12 @@ impl App {
             confirm_delete: false,
             message: Some("Scanning... results will appear as they are found.".to_string()),
             filter: CategoryFilter::All,
+            risk_filter: RiskFilter::All,
+            min_size: None,
+            min_size_index: 0,
             sort_mode: SortMode::SizeDesc,
             focus_pinned_by_user: false,
+            scan_errors: 0,
         };
         app.start_scan();
         Ok(app)
@@ -309,8 +407,10 @@ impl App {
         .block(
             Block::default()
                 .title(format!(
-                    " Cleanup candidates  filter:{}  sort:{}  showing:{}/{} ",
+                    " Cleanup candidates  cat:{}  risk:{}  min:{}  sort:{}  showing:{}/{} ",
                     self.filter.label(),
+                    self.risk_filter.label(),
+                    min_size_label(self.min_size),
                     self.sort_mode.label(),
                     visible_indices.len(),
                     self.artifacts.len()
@@ -476,7 +576,7 @@ impl App {
             frame,
             metrics[0],
             "RELEASABLE",
-            &human_size(total_size(&self.artifacts)),
+            &human_size(self.releasable_size()),
             Color::Green,
         );
         self.render_metric(
@@ -515,9 +615,10 @@ impl App {
             .unwrap_or_else(|| "Preparing scan...".to_string());
         let label = if self.scanning {
             format!(
-                "Current: {}   filter:{} showing:{}",
-                truncate_middle(&current_path, area.width.saturating_sub(48) as usize),
+                "Current: {}   cat:{} risk:{} showing:{}",
+                truncate_middle(&current_path, area.width.saturating_sub(52) as usize),
                 self.filter.label(),
+                self.risk_filter.label(),
                 visible_count
             )
         } else {
@@ -629,20 +730,22 @@ impl App {
         );
 
         let key_line = Line::from(vec![
-            key("UP/DOWN"),
+            key("↑↓/jk"),
             label(" Move  "),
             key("Space"),
             label(" Select  "),
             key("a"),
-            label(" Add SAFE only  "),
+            label(" SAFE  "),
             key("d"),
-            label(" Delete  "),
+            label(" Del  "),
             key("f"),
-            label(" Filter  "),
+            label(" Cat  "),
+            key("t"),
+            label(" Risk  "),
+            key("m"),
+            label(" Min  "),
             key("s"),
             label(" Sort  "),
-            key("Enter"),
-            label(" Details  "),
             key("r"),
             label(" Rescan  "),
             key("q"),
@@ -759,7 +862,20 @@ impl App {
     fn next_filter(&mut self) {
         self.filter = self.filter.next();
         self.align_selection_to_filter();
-        self.message = Some(format!("Filter: {}", self.filter.label()));
+        self.message = Some(format!("Category filter: {}", self.filter.label()));
+    }
+
+    fn next_risk_filter(&mut self) {
+        self.risk_filter = self.risk_filter.next();
+        self.align_selection_to_filter();
+        self.message = Some(format!("Risk filter: {}", self.risk_filter.label()));
+    }
+
+    fn next_min_size(&mut self) {
+        self.min_size_index = (self.min_size_index + 1) % MIN_SIZE_STEPS.len();
+        self.min_size = MIN_SIZE_STEPS[self.min_size_index];
+        self.align_selection_to_filter();
+        self.message = Some(format!("Min size: {}", min_size_label(self.min_size)));
     }
 
     fn next_sort(&mut self) {
@@ -779,41 +895,59 @@ impl App {
         self.selected.clear();
         self.deleted.clear();
         self.deleted_size = 0;
+        self.scan_errors = 0;
         self.state.select(None);
         self.focus_pinned_by_user = false;
         self.message = Some("Scanning... results will appear as they are found.".to_string());
         self.start_scan();
     }
 
-    fn delete_selected(&mut self) -> Result<()> {
+    fn delete_selected(&mut self) {
         let selected: Vec<Artifact> = self
             .artifacts
             .iter()
             .filter(|artifact| self.is_active_selected(artifact))
             .cloned()
             .collect();
-        let deleted_paths = selected
-            .iter()
-            .map(|artifact| artifact.path.clone())
-            .collect::<HashSet<_>>();
-        let removed = remove_artifacts(&selected)?;
+        let report = remove_artifacts(&selected);
         self.confirm_delete = false;
-        self.deleted.extend(deleted_paths.iter().cloned());
-        self.deleted_size = self.deleted_size.saturating_add(removed);
-        self.selected.clear();
+        self.deleted.extend(report.deleted.iter().cloned());
+        self.deleted_size = self.deleted_size.saturating_add(report.bytes_removed);
+        for path in &report.deleted {
+            self.selected.remove(path);
+        }
         self.align_selection_to_filter();
-        self.message = Some(format!(
-            "Deleted {} from {} items. Marked as DEL.",
-            human_size(removed),
-            deleted_paths.len()
-        ));
-        Ok(())
+        if report.failed.is_empty() {
+            self.message = Some(format!(
+                "Deleted {} from {} items. Marked as DEL.",
+                human_size(report.bytes_removed),
+                report.deleted.len()
+            ));
+        } else {
+            let first = &report.failed[0];
+            self.message = Some(format!(
+                "Deleted {} item(s) ({}). Failed {}: {} ({})",
+                report.deleted.len(),
+                human_size(report.bytes_removed),
+                report.failed.len(),
+                first.0.display(),
+                first.1
+            ));
+        }
     }
 
     fn selected_size(&self) -> u64 {
         self.artifacts
             .iter()
             .filter(|artifact| self.is_active_selected(artifact))
+            .map(|artifact| artifact.size)
+            .sum()
+    }
+
+    fn releasable_size(&self) -> u64 {
+        self.artifacts
+            .iter()
+            .filter(|artifact| !self.is_deleted(artifact))
             .map(|artifact| artifact.size)
             .sum()
     }
@@ -850,6 +984,7 @@ impl App {
         self.current_path = None;
         self.deleted.clear();
         self.deleted_size = 0;
+        self.scan_errors = 0;
         self.focus_pinned_by_user = false;
         thread::spawn(move || scan_to_channel(paths, sender));
     }
@@ -874,12 +1009,24 @@ impl App {
                     self.message =
                         Some(format!("Scanning... found {} items.", self.artifacts.len()));
                 }
+                ScanEvent::Error(message) => {
+                    self.scan_errors = self.scan_errors.saturating_add(1);
+                    self.message = Some(format!("Scan warning: {message}"));
+                }
                 ScanEvent::Done => {
                     self.scanning = false;
-                    self.message = Some(format!(
-                        "Scan complete. Found {} items.",
-                        self.artifacts.len()
-                    ));
+                    if self.scan_errors > 0 {
+                        self.message = Some(format!(
+                            "Scan complete. Found {} items ({} warnings).",
+                            self.artifacts.len(),
+                            self.scan_errors
+                        ));
+                    } else {
+                        self.message = Some(format!(
+                            "Scan complete. Found {} items.",
+                            self.artifacts.len()
+                        ));
+                    }
                     keep_receiver = false;
                 }
             }
@@ -917,6 +1064,24 @@ impl App {
             SortMode::SizeAsc => self
                 .artifacts
                 .sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.path.cmp(&b.path))),
+            SortMode::AgeDesc => self.artifacts.sort_by(|a, b| {
+                b.last_modified
+                    .cmp(&a.last_modified)
+                    .then_with(|| a.path.cmp(&b.path))
+            }),
+            SortMode::AgeAsc => self.artifacts.sort_by(|a, b| {
+                a.last_modified
+                    .cmp(&b.last_modified)
+                    .then_with(|| a.path.cmp(&b.path))
+            }),
+            SortMode::Path => self.artifacts.sort_by(|a, b| a.path.cmp(&b.path)),
+            SortMode::Risk => self.artifacts.sort_by(|a, b| {
+                a.risk_level
+                    .rank()
+                    .cmp(&b.risk_level.rank())
+                    .then_with(|| b.size.cmp(&a.size))
+                    .then_with(|| a.path.cmp(&b.path))
+            }),
         }
     }
 
@@ -977,7 +1142,10 @@ impl App {
             .iter()
             .enumerate()
             .filter_map(|(index, artifact)| {
-                if self.filter.matches(artifact) {
+                if self.filter.matches(artifact)
+                    && self.risk_filter.matches(artifact)
+                    && self.min_size.is_none_or(|min| artifact.size >= min)
+                {
                     Some(index)
                 } else {
                     None
@@ -1045,6 +1213,16 @@ impl App {
         } else {
             self.align_selection_to_filter();
         }
+    }
+}
+
+fn min_size_label(min_size: Option<u64>) -> String {
+    match min_size {
+        None => "off".to_string(),
+        Some(10_000_000) => "10MB".to_string(),
+        Some(100_000_000) => "100MB".to_string(),
+        Some(1_000_000_000) => "1GB".to_string(),
+        Some(other) => human_size(other),
     }
 }
 
@@ -1223,7 +1401,7 @@ mod tests {
         app.state.select(Some(0));
         app.selected.insert(delete_path.clone());
 
-        app.delete_selected().unwrap();
+        app.delete_selected();
 
         assert!(!delete_path.exists());
         assert!(keep_path.exists());
@@ -1231,8 +1409,10 @@ mod tests {
         assert!(app.deleted.contains(&delete_path));
         assert!(app.selected.is_empty());
         assert!(!app.scanning);
-        assert_eq!(total_size(&app.artifacts), 30);
-        assert_eq!(app.deleted_size, 20);
+        assert_eq!(app.releasable_size(), 10);
+        // bytes_removed uses on-disk remeasure, not the fixture size field
+        assert!(app.deleted_size >= 1);
+        assert!(!app.deleted.contains(&keep_path));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1284,6 +1464,22 @@ mod tests {
         assert!(!app.selected.contains(&deleted_path));
     }
 
+    #[test]
+    fn category_filter_separates_agent_and_agent_cache() {
+        let mut app = test_app();
+        app.artifacts = vec![
+            test_artifact_with_category(PathBuf::from("/a"), 10, "AGENT"),
+            test_artifact_with_category(PathBuf::from("/b"), 20, "AGENT_CACHE"),
+            test_artifact_with_category(PathBuf::from("/c"), 30, "CACHE"),
+        ];
+        app.filter = CategoryFilter::Agent;
+        assert_eq!(app.visible_indices().len(), 1);
+        app.filter = CategoryFilter::AgentCache;
+        assert_eq!(app.visible_indices().len(), 1);
+        app.filter = CategoryFilter::Cache;
+        assert_eq!(app.visible_indices().len(), 1);
+    }
+
     fn test_app() -> App {
         let mut state = TableState::default();
         state.select(None);
@@ -1307,8 +1503,12 @@ mod tests {
             confirm_delete: false,
             message: None,
             filter: CategoryFilter::All,
+            risk_filter: RiskFilter::All,
+            min_size: None,
+            min_size_index: 0,
             sort_mode: SortMode::SizeDesc,
             focus_pinned_by_user: false,
+            scan_errors: 0,
         }
     }
 
@@ -1330,6 +1530,12 @@ mod tests {
             git_status_clean: None,
             dangerous_files_detected: Vec::new(),
         }
+    }
+
+    fn test_artifact_with_category(path: PathBuf, size: u64, category: &str) -> Artifact {
+        let mut artifact = test_artifact(path, size);
+        artifact.category = category.to_string();
+        artifact
     }
 
     fn temp_root(name: &str) -> PathBuf {
