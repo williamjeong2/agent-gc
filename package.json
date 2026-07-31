@@ -1,6 +1,6 @@
 {
   "name": "agent-gc",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "AI agent worktree and dev artifact garbage collector",
   "keywords": [
     "rust",
@@ -28,7 +28,8 @@
   },
   "os": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
   ],
   "cpu": [
     "arm64",

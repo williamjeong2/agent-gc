@@ -56,18 +56,20 @@ General disk cleaners can find large folders, but they usually do not understand
 
 `agent-gc` is early software (0.2.x).
 
-Published npm packages currently include a **macOS arm64** vendor binary by default. Other platforms can build from source and use `scripts/vendor-current.sh`.
+Published npm packages currently include a **macOS arm64** vendor binary by default. Scan/runtime logic is multi-platform (separator-agnostic paths, portable home, XDG roots). Other OS binaries: build from source + `scripts/vendor-current.sh`, or ship via CI later.
 
 ```text
 Vendor binary shipped today: macOS arm64
-Wrapper also looks for:      macOS x64, Linux x64, Linux arm64
-From source:                 cargo build --release
+Wrapper looks for:           darwin-arm64, darwin-x64, linux-x64, linux-arm64,
+                             win32-x64, win32-arm64
+From source:                 cargo build --release && ./scripts/vendor-current.sh
 ```
 
 ### 0.2 highlights
 
 - Safer classification (fewer false positives)
-- Skip `.git` / VCS dirs; cache git status per project
+- Skip `.git` / VCS / trash dirs; cache git status per project
+- Path segment matching (`/` and `\` safe); portable home + XDG roots
 - TUI accepts scan paths; category/risk/min-size filters; multi-mode sort
 - CLI presets: `safe`, `agent-only`, `older` + `--older-than`
 - CLI `--yes` for scripts; non-TTY delete refused without it
@@ -178,15 +180,23 @@ When no paths are given, `agent-gc` scans these locations if they exist:
 ~/.codex/worktrees
 ~/.claude
 ~/.opencode
-~/.config/opencode
-~/.cache/opencode
 ~/.cursor
 ~/.gemini
 ~/.aider
+$XDG_CONFIG_HOME/opencode  (or ~/.config/opencode)
+$XDG_CACHE_HOME/opencode   (or ~/.cache/opencode)
 ~/dev
 ~/workspace
 ~/projects
+~/Developer
+~/src
+# Windows also tries:
+~/source/repos
+~/Documents/GitHub
+~/Documents/Projects
 ```
+
+Agent path detection uses path **components**, not raw `"/..."` substrings, so classification stays correct on Windows-style paths.
 
 You can also pass explicit paths:
 

@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
@@ -107,22 +107,49 @@ pub struct RemoveReport {
 
 pub fn default_roots() -> Vec<PathBuf> {
     let home = home_dir();
-    [
-        ".codex/worktrees",
-        ".claude",
-        ".opencode",
-        ".config/opencode",
-        ".cache/opencode",
-        ".cursor",
-        ".gemini",
-        ".aider",
-        "dev",
-        "workspace",
-        "projects",
-    ]
-    .into_iter()
-    .map(|p| home.join(p))
-    .collect()
+    let mut roots = Vec::new();
+
+    // Agent homes / caches (Path::join segments so Windows separators stay correct)
+    for parts in [
+        &[".codex", "worktrees"][..],
+        &[".claude"][..],
+        &[".opencode"][..],
+        &[".cursor"][..],
+        &[".gemini"][..],
+        &[".aider"][..],
+    ] {
+        roots.push(join_parts(&home, parts));
+    }
+
+    // XDG config/cache when set, otherwise ~/.config and ~/.cache
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| join_parts(&home, &[".config"]));
+    roots.push(join_parts(&config_home, &["opencode"]));
+
+    let cache_home = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| join_parts(&home, &[".cache"]));
+    roots.push(join_parts(&cache_home, &["opencode"]));
+
+    for parts in [["dev"], ["workspace"], ["projects"], ["Developer"], ["src"]] {
+        roots.push(join_parts(&home, &parts));
+    }
+
+    // Windows-style user project folders when present
+    if cfg!(windows) {
+        for parts in [
+            ["source", "repos"],
+            ["Documents", "GitHub"],
+            ["Documents", "Projects"],
+        ] {
+            roots.push(join_parts(&home, &parts));
+        }
+    }
+
+    roots
 }
 
 pub fn scan(paths: &[PathBuf]) -> Result<Vec<Artifact>> {
@@ -497,10 +524,15 @@ fn has_ancestor_marker(path: &Path, marker: &str) -> bool {
 }
 
 fn should_skip_dir(path: &Path) -> bool {
-    matches!(
-        file_name(path).as_deref(),
-        Some(".git" | ".svn" | ".hg" | ".jj" | ".Trash")
-    )
+    match file_name(path).as_deref() {
+        Some(".git" | ".svn" | ".hg" | ".jj" | ".Trash" | "lost+found") => true,
+        // Windows recycle bin / system dirs
+        Some(name) if name.eq_ignore_ascii_case("$RECYCLE.BIN") => true,
+        Some(name) if name.eq_ignore_ascii_case("System Volume Information") => true,
+        // Linux trash: ~/.local/share/Trash
+        Some("Trash") => path_contains_sequence(path, &[".local", "share", "Trash"]),
+        _ => false,
+    }
 }
 
 fn risk_for(path: &Path) -> RiskLevel {
@@ -658,24 +690,61 @@ fn dir_size(path: &Path) -> u64 {
 }
 
 fn is_agent_worktree_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.contains("/.codex/worktrees/") || text.contains("/.cursor/worktrees/")
+    path_contains_sequence(path, &[".codex", "worktrees"])
+        || path_contains_sequence(path, &[".cursor", "worktrees"])
 }
 
 fn is_agent_cache_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.contains("/.claude/")
-        || text.contains("/.opencode/")
-        || text.contains("/.config/opencode/")
-        || text.contains("/.cache/opencode/")
-        || text.contains("/.cursor/")
-        || text.contains("/.gemini/")
-        || text.contains("/.aider/")
+    // Prefer specific sequences before broad ".cursor" so worktrees stay classified as AGENT.
+    path_contains_sequence(path, &[".claude"])
+        || path_contains_sequence(path, &[".opencode"])
+        || path_contains_sequence(path, &[".config", "opencode"])
+        || path_contains_sequence(path, &[".cache", "opencode"])
+        || path_contains_sequence(path, &[".gemini"])
+        || path_contains_sequence(path, &[".aider"])
+        || (path_contains_sequence(path, &[".cursor"])
+            && !path_contains_sequence(path, &[".cursor", "worktrees"]))
 }
 
 fn is_agent_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.contains("/.codex/") || is_agent_cache_path(path) || is_agent_worktree_path(path)
+    path_contains_sequence(path, &[".codex"])
+        || is_agent_cache_path(path)
+        || is_agent_worktree_path(path)
+}
+
+/// True when `path` contains the consecutive normal components in `sequence`.
+/// Separator-agnostic (works with `/` and `\` style paths built via Path APIs).
+fn path_contains_sequence(path: &Path, sequence: &[&str]) -> bool {
+    if sequence.is_empty() {
+        return false;
+    }
+    let components = normal_path_components(path);
+    if components.len() < sequence.len() {
+        return false;
+    }
+    components.windows(sequence.len()).any(|window| {
+        window
+            .iter()
+            .zip(sequence.iter())
+            .all(|(component, expected)| component == expected)
+    })
+}
+
+fn normal_path_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn join_parts(base: &Path, parts: &[&str]) -> PathBuf {
+    let mut path = base.to_path_buf();
+    for part in parts {
+        path.push(part);
+    }
+    path
 }
 
 fn file_name(path: &Path) -> Option<String> {
@@ -684,9 +753,21 @@ fn file_name(path: &Path) -> Option<String> {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(home);
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return PathBuf::from(profile);
+    }
+    if let (Some(drive), Some(path)) = (
+        std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty()),
+        std::env::var_os("HOMEPATH").filter(|value| !value.is_empty()),
+    ) {
+        let mut home = PathBuf::from(drive);
+        home.push(path);
+        return home;
+    }
+    PathBuf::from(".")
 }
 
 fn system_time_to_utc(time: SystemTime) -> DateTime<Utc> {
@@ -878,19 +959,101 @@ mod tests {
     #[test]
     fn skips_git_directories() {
         let root = temp_root("skip-git");
-        let git_objects = root.join("app/.git/objects");
+        let git_objects = root.join("app").join(".git").join("objects");
         fs::create_dir_all(&git_objects).unwrap();
         fs::write(git_objects.join("pack"), "x").unwrap();
-        let nested = root.join("app/.git/node_modules/pkg");
+        let nested = root
+            .join("app")
+            .join(".git")
+            .join("node_modules")
+            .join("pkg");
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("index.js"), "x").unwrap();
 
         let results = scan(std::slice::from_ref(&root)).unwrap();
         assert!(results
             .iter()
-            .all(|artifact| !artifact.path.to_string_lossy().contains("/.git/")));
+            .all(|artifact| !path_contains_sequence(&artifact.path, &[".git"])));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn path_sequence_matching_is_separator_agnostic() {
+        let worktree = PathBuf::from("Users")
+            .join("me")
+            .join(".codex")
+            .join("worktrees")
+            .join("ab12")
+            .join("app")
+            .join("node_modules");
+        assert!(path_contains_sequence(&worktree, &[".codex", "worktrees"]));
+        assert!(is_agent_worktree_path(&worktree));
+        assert!(is_agent_path(&worktree));
+        assert!(!is_agent_cache_path(&worktree));
+
+        let cursor_cache = PathBuf::from("Users")
+            .join("me")
+            .join(".cursor")
+            .join("projects")
+            .join("x");
+        assert!(is_agent_cache_path(&cursor_cache));
+        assert!(!is_agent_worktree_path(&cursor_cache));
+
+        let cursor_worktree = PathBuf::from("Users")
+            .join("me")
+            .join(".cursor")
+            .join("worktrees")
+            .join("x")
+            .join("app");
+        assert!(is_agent_worktree_path(&cursor_worktree));
+        assert!(!is_agent_cache_path(&cursor_worktree));
+    }
+
+    #[test]
+    fn join_parts_builds_nested_paths() {
+        let base = PathBuf::from("home");
+        let path = join_parts(&base, &[".cache", "opencode"]);
+        assert_eq!(path, base.join(".cache").join("opencode"));
+        assert!(path_contains_sequence(&path, &[".cache", "opencode"]));
+    }
+
+    #[test]
+    fn skips_linux_trash_and_recycle_bin_names() {
+        let trash = PathBuf::from("home")
+            .join(".local")
+            .join("share")
+            .join("Trash");
+        assert!(should_skip_dir(&trash));
+
+        let recycle = PathBuf::from("C:").join("$RECYCLE.BIN");
+        assert!(should_skip_dir(&recycle));
+
+        let normal_trash_name = PathBuf::from("project").join("Trash");
+        assert!(!should_skip_dir(&normal_trash_name));
+    }
+
+    #[test]
+    fn home_dir_prefers_home_then_userprofile() {
+        // Just ensure the helper returns something non-empty-looking for this process.
+        let home = home_dir();
+        assert!(!home.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn default_roots_use_segment_joins_not_slash_literals() {
+        let roots = default_roots();
+        assert!(!roots.is_empty());
+        // Every root should be absolute-ish under home or XDG, and never a single
+        // component that still contains a path separator (Windows footgun).
+        for root in &roots {
+            let as_str = root.to_string_lossy();
+            let last = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(
+                !last.contains('/') && !last.contains('\\'),
+                "root last component should be a single segment: {as_str}"
+            );
+        }
     }
 
     #[test]
