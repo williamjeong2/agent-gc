@@ -9,6 +9,7 @@
     "codex",
     "claude-code",
     "opencode",
+    "orca",
     "disk-cleanup"
   ],
   "homepage": "https://github.com/williamjeong2/agent-gc#readme",

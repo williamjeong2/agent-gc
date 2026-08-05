@@ -117,6 +117,7 @@ pub fn default_roots() -> Vec<PathBuf> {
         &[".cursor"][..],
         &[".gemini"][..],
         &[".aider"][..],
+        &[".orca"][..],
     ] {
         roots.push(join_parts(&home, parts));
     }
@@ -134,7 +135,14 @@ pub fn default_roots() -> Vec<PathBuf> {
         .unwrap_or_else(|| join_parts(&home, &[".cache"]));
     roots.push(join_parts(&cache_home, &["opencode"]));
 
-    for parts in [["dev"], ["workspace"], ["projects"], ["Developer"], ["src"]] {
+    for parts in [
+        ["dev"],
+        ["workspace"],
+        ["projects"],
+        ["Developer"],
+        ["src"],
+        ["orca"],
+    ] {
         roots.push(join_parts(&home, &parts));
     }
 
@@ -692,6 +700,8 @@ fn dir_size(path: &Path) -> u64 {
 fn is_agent_worktree_path(path: &Path) -> bool {
     path_contains_sequence(path, &[".codex", "worktrees"])
         || path_contains_sequence(path, &[".cursor", "worktrees"])
+        || path_contains_sequence(path, &["orca", "projects"])
+        || path_contains_sequence(path, &["orca", "workspaces"])
 }
 
 fn is_agent_cache_path(path: &Path) -> bool {
@@ -702,6 +712,7 @@ fn is_agent_cache_path(path: &Path) -> bool {
         || path_contains_sequence(path, &[".cache", "opencode"])
         || path_contains_sequence(path, &[".gemini"])
         || path_contains_sequence(path, &[".aider"])
+        || path_contains_sequence(path, &[".orca"])
         || (path_contains_sequence(path, &[".cursor"])
             && !path_contains_sequence(path, &[".cursor", "worktrees"]))
 }
@@ -1008,6 +1019,70 @@ mod tests {
             .join("app");
         assert!(is_agent_worktree_path(&cursor_worktree));
         assert!(!is_agent_cache_path(&cursor_worktree));
+
+        let orca_project = PathBuf::from("Users")
+            .join("me")
+            .join("orca")
+            .join("projects")
+            .join("app")
+            .join("node_modules");
+        assert!(is_agent_worktree_path(&orca_project));
+        assert!(is_agent_path(&orca_project));
+        assert!(!is_agent_cache_path(&orca_project));
+
+        let orca_workspace = PathBuf::from("Users")
+            .join("me")
+            .join("orca")
+            .join("workspaces")
+            .join("app")
+            .join("node_modules");
+        assert!(is_agent_worktree_path(&orca_workspace));
+
+        let orca_home = PathBuf::from("Users")
+            .join("me")
+            .join(".orca")
+            .join("hooks");
+        assert!(is_agent_cache_path(&orca_home));
+        assert!(is_agent_path(&orca_home));
+        assert!(!is_agent_worktree_path(&orca_home));
+    }
+
+    #[test]
+    fn orca_project_artifacts_are_agent_worktrees_and_orca_home_is_agent_cache() {
+        let root = temp_root("orca-targets");
+        let project = root.join("orca/projects/app");
+        let artifact = project.join("node_modules/pkg");
+        fs::create_dir_all(&artifact).unwrap();
+        fs::write(artifact.join("index.js"), "x").unwrap();
+
+        let home_cache = root.join(".orca/hooks/node_modules/pkg");
+        fs::create_dir_all(&home_cache).unwrap();
+        fs::write(home_cache.join("index.js"), "x").unwrap();
+
+        let results = scan(&[root.join("orca"), root.join(".orca")]).unwrap();
+        let project_nm = results
+            .iter()
+            .find(|artifact| artifact.path == project.join("node_modules"))
+            .unwrap();
+        assert_eq!(project_nm.category, CATEGORY_AGENT);
+        assert!(project_nm.is_agent_worktree);
+
+        let home_nm = results
+            .iter()
+            .find(|artifact| artifact.path == root.join(".orca/hooks/node_modules"))
+            .unwrap();
+        assert_eq!(home_nm.category, CATEGORY_AGENT_CACHE);
+        assert!(!home_nm.is_agent_worktree);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_roots_include_orca_paths() {
+        let roots = default_roots();
+        let home = home_dir();
+        assert!(roots.contains(&join_parts(&home, &[".orca"])));
+        assert!(roots.contains(&join_parts(&home, &["orca"])));
     }
 
     #[test]

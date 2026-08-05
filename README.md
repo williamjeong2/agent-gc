@@ -2,7 +2,7 @@
 
 > A lightweight Rust TUI for cleaning up AI coding agent worktrees, duplicate dependencies, and build artifacts.
 
-`agent-gc` helps developers reclaim disk space left behind by tools like Codex, Claude Code, OpenCode, Cursor, and ordinary local development workflows. It is inspired by the simplicity of `npkill`, but focuses on agent-generated worktrees and safer cleanup decisions.
+`agent-gc` helps developers reclaim disk space left behind by tools like Codex, Claude Code, OpenCode, Cursor, Orca, and ordinary local development workflows. It is inspired by the simplicity of `npkill`, but focuses on agent-generated worktrees and safer cleanup decisions.
 
 ```bash
 npx agent-gc
@@ -45,7 +45,7 @@ General disk cleaners can find large folders, but they usually do not understand
 - Scans common AI agent and developer project paths
 - Detects dependency folders, build outputs, and language caches
 - Marker-aware classification (`target` needs `Cargo.toml`; bare `env` needs venv markers)
-- Groups Codex, Claude Code, OpenCode, Cursor, Gemini, and Aider paths as agent-related candidates
+- Groups Codex, Claude Code, OpenCode, Cursor, Gemini, Aider, and Orca paths as agent-related candidates
 - Calculates size, last modified time, category, risk level, project name, git cleanliness, and dangerous file presence
 - Locks dangerous candidates so they cannot be selected or deleted
 - Partial-delete reporting (successful deletes are marked even if some paths fail)
@@ -183,6 +183,7 @@ When no paths are given, `agent-gc` scans these locations if they exist:
 ~/.cursor
 ~/.gemini
 ~/.aider
+~/.orca
 $XDG_CONFIG_HOME/opencode  (or ~/.config/opencode)
 $XDG_CACHE_HOME/opencode   (or ~/.cache/opencode)
 ~/dev
@@ -190,6 +191,7 @@ $XDG_CACHE_HOME/opencode   (or ~/.cache/opencode)
 ~/projects
 ~/Developer
 ~/src
+~/orca                       (Orca-managed project/workspace checkouts)
 # Windows also tries:
 ~/source/repos
 ~/Documents/GitHub
