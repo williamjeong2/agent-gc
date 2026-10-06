@@ -1,0 +1,6 @@
+# Windows MSVC 바이너리가 VC++ 런타임(vcruntime140.dll) 없이도 실행되도록 CRT를 정적 링크한다.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,6 +1,6 @@
 [package]
 name = "agent-gc"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 default-run = "agent-gc"
 
@@ -17,3 +17,6 @@ walkdir = "2"
 [[bin]]
 name = "ag"
 path = "src/bin/ag.rs"
+
+[profile.release]
+strip = true

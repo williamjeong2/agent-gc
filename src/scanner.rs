@@ -1179,6 +1179,56 @@ mod tests {
     }
 
     #[test]
+    fn remove_artifacts_deletes_safe_dir_with_readonly_file() {
+        let root = temp_root("readonly-remove");
+        let _cleanup = CleanupDir(root.clone());
+        let project = root.join("app");
+        let node_modules = project.join("node_modules");
+        let nested = node_modules.join("pkg").join("lib");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(project.join("package.json"), "{}").unwrap();
+        fs::write(nested.join("index.js"), "x").unwrap();
+        let readonly_file = node_modules.join("pkg").join("readonly.txt");
+        fs::write(&readonly_file, "locked").unwrap();
+        let mut permissions = fs::metadata(&readonly_file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&readonly_file, permissions).unwrap();
+
+        let results = scan(std::slice::from_ref(&root)).unwrap();
+        let artifact = results
+            .iter()
+            .find(|artifact| artifact.path == node_modules)
+            .unwrap();
+        assert_eq!(artifact.risk_level, RiskLevel::Safe);
+
+        let report = remove_artifacts(std::slice::from_ref(artifact));
+        assert!(report.failed.is_empty(), "failed: {:?}", report.failed);
+        assert_eq!(report.deleted, vec![node_modules.clone()]);
+        assert!(!node_modules.exists());
+        assert!(project.join("package.json").exists());
+    }
+
+    /// Removes a temp tree on drop, clearing read-only flags first so cleanup
+    /// still succeeds when an assertion fails mid-test.
+    struct CleanupDir(PathBuf);
+
+    impl Drop for CleanupDir {
+        fn drop(&mut self) {
+            for entry in WalkDir::new(&self.0).into_iter().flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    let mut permissions = metadata.permissions();
+                    if permissions.readonly() {
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        permissions.set_readonly(false);
+                        let _ = fs::set_permissions(entry.path(), permissions);
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
     fn preset_agent_only_filters_safe_agent_paths() {
         let agent = Artifact {
             path: PathBuf::from("/tmp/agent/node_modules"),

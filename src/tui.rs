@@ -4,7 +4,7 @@ use crate::scanner::{
 };
 use anyhow::Result;
 use chrono::Utc;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -82,6 +82,13 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
     result
 }
 
+/// Windows terminals emit Press and Release (and Repeat) events for every key,
+/// while Unix terminals only emit Press. Acting on Release would double-apply
+/// toggles like Space, so only Press and Repeat are handled.
+fn is_actionable_key(key: &KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, paths: Vec<PathBuf>) -> Result<()> {
     let mut app = App::new(paths)?;
 
@@ -93,6 +100,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, paths: Vec<PathBuf
         }
 
         if let Event::Key(key) = event::read()? {
+            if !is_actionable_key(&key) {
+                continue;
+            }
             if app.confirm_delete {
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -1355,6 +1365,15 @@ mod tests {
             App::search_bar_pulse_segments(width, travel + 1),
             (travel - 1, pulse, 1)
         );
+    }
+
+    #[test]
+    fn only_press_and_repeat_key_events_are_actionable() {
+        let key = |kind| KeyEvent::new_with_kind(KeyCode::Char(' '), KeyModifiers::NONE, kind);
+
+        assert!(is_actionable_key(&key(KeyEventKind::Press)));
+        assert!(is_actionable_key(&key(KeyEventKind::Repeat)));
+        assert!(!is_actionable_key(&key(KeyEventKind::Release)));
     }
 
     #[test]

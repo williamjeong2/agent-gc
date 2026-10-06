@@ -1,0 +1,192 @@
+name: Release
+
+# v* 태그 push → 6개 플랫폼 빌드·테스트 → npm 패키지 조립 → 각 OS에서 설치 검증 → npm/GitHub Release 배포.
+# 릴리스 관련 파일을 바꾸는 PR과 workflow_dispatch(publish=false)는 배포 없이 전체 파이프라인을 리허설한다.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".cargo/**"
+      - "bin/**"
+      - "scripts/**"
+      - "package.json"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm and create a GitHub Release"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
+          - { platform: darwin-x64, os: macos-15-intel, target: x86_64-apple-darwin }
+          - { platform: linux-x64, os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { platform: win32-x64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: .exe }
+          - { platform: win32-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc, exe: .exe }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo test --locked --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage vendor binary
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/agent-gc${{ matrix.exe }}" "dist/agent-gc-${{ matrix.platform }}${{ matrix.exe }}"
+      - name: Smoke test release binary
+        run: scripts/smoke-test.sh "dist/agent-gc-${{ matrix.platform }}${{ matrix.exe }}"
+      - name: Check Linux binary is static
+        if: runner.os == 'Linux'
+        run: |
+          file "dist/agent-gc-${{ matrix.platform }}"
+          file "dist/agent-gc-${{ matrix.platform }}" | grep -Eq 'statically linked|static-pie linked'
+      - uses: actions/upload-artifact@v5
+        with:
+          name: bin-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Check versions
+        id: version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          lock_version="$(grep -A1 '^name = "agent-gc"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
+          echo "package.json=$pkg Cargo.toml=$cargo_version Cargo.lock=$lock_version"
+          [[ "$pkg" == "$cargo_version" && "$pkg" == "$lock_version" ]] || { echo "version mismatch" >&2; exit 1; }
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$pkg" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json v$pkg" >&2
+            exit 1
+          fi
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bin-*
+          path: vendor
+          merge-multiple: true
+      - name: Verify vendor binaries
+        run: |
+          chmod 755 vendor/agent-gc-*
+          for name in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64.exe win32-arm64.exe; do
+            test -s "vendor/agent-gc-$name" || { echo "missing vendor/agent-gc-$name" >&2; exit 1; }
+          done
+          ls -l vendor
+      - run: npm pack
+      - name: Inspect tarball
+        run: tar -tvzf agent-gc-*.tgz
+      - uses: actions/upload-artifact@v5
+        with:
+          name: npm-package
+          path: agent-gc-*.tgz
+          if-no-files-found: error
+
+  verify:
+    name: verify npm install (${{ matrix.platform }})
+    needs: package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: darwin-arm64, os: macos-latest }
+          - { platform: darwin-x64, os: macos-15-intel }
+          - { platform: linux-x64, os: ubuntu-latest }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm }
+          - { platform: win32-x64, os: windows-latest }
+          - { platform: win32-arm64, os: windows-11-arm }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v5
+        with:
+          name: npm-package
+          path: pkg
+      - name: Install package globally
+        run: npm install -g ./pkg/agent-gc-*.tgz
+      - name: Report resolved platform
+        run: node -p "process.platform + '-' + process.arch"
+      - name: Smoke test agent-gc via npm wrapper
+        run: scripts/smoke-test.sh agent-gc
+      - name: Smoke test ag alias
+        run: ag --version
+
+  publish:
+    needs: [package, verify]
+    if: github.ref_type == 'tag' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Use npm with trusted publishing support
+        run: npm install -g npm@latest
+      - uses: actions/download-artifact@v5
+        with:
+          name: npm-package
+          path: pkg
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bin-*
+          path: bin
+          merge-multiple: true
+      # npm trusted publisher(OIDC)가 설정되어 있으면 토큰 없이 배포되고, 아니면 NPM_TOKEN을 쓴다.
+      - name: Publish to npm
+        run: npm publish ./pkg/agent-gc-*.tgz --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          gh release create "v$VERSION" bin/* pkg/agent-gc-*.tgz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "agent-gc $VERSION" \
+            --generate-notes
