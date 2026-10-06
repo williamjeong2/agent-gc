@@ -56,14 +56,24 @@ General disk cleaners can find large folders, but they usually do not understand
 
 `agent-gc` is early software (0.2.x).
 
-Published npm packages currently include a **macOS arm64** vendor binary by default. Scan/runtime logic is multi-platform (separator-agnostic paths, portable home, XDG roots). Other OS binaries: build from source + `scripts/vendor-current.sh`, or ship via CI later.
+The npm package ships native binaries for six platforms, built and verified in CI on native runners:
 
 ```text
-Vendor binary shipped today: macOS arm64
-Wrapper looks for:           darwin-arm64, darwin-x64, linux-x64, linux-arm64,
-                             win32-x64, win32-arm64
-From source:                 cargo build --release && ./scripts/vendor-current.sh
+darwin-arm64   macOS Apple Silicon
+darwin-x64     macOS Intel
+linux-x64      Linux x86_64 (static musl, no glibc requirement)
+linux-arm64    Linux aarch64 (static musl, no glibc requirement)
+win32-x64      Windows x64 (static CRT)
+win32-arm64    Windows on ARM (static CRT)
 ```
+
+Binaries are also attached to each [GitHub Release](https://github.com/williamjeong2/agent-gc/releases). Other platforms can build from source: `cargo build --release && ./scripts/vendor-current.sh`.
+
+### 0.3 highlights
+
+- Multi-arch release pipeline: every release is built, tested, and installed via npm on all six platforms before publishing
+- Windows TUI fix: key release events are ignored, so each keypress is handled once
+- npm wrapper restores the executable bit if a package manager drops it
 
 ### 0.2 highlights
 

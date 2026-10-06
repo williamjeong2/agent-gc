@@ -89,12 +89,27 @@ function printMissingBinaryHelp(platform) {
   );
 }
 
+// Some package managers drop the executable bit when unpacking tarballs.
+function ensureExecutable(file) {
+  if (process.platform === "win32") return;
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+  } catch (error) {
+    try {
+      fs.chmodSync(file, 493); // 0o755
+    } catch (chmodError) {
+      // Fall through; spawnSync reports EACCES if it is still not runnable.
+    }
+  }
+}
+
 var platform = platformName();
 var bin = findBinary();
 if (!bin) {
   printMissingBinaryHelp(platform);
   process.exit(1);
 }
+ensureExecutable(bin);
 
 var result = childProcess.spawnSync(bin, process.argv.slice(2), {
   stdio: "inherit",

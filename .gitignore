@@ -3,3 +3,5 @@
 .omx/
 *.tgz
 LOCAL_NOTES.md
+# CI가 릴리스 시점에 채운다
+/vendor/agent-gc-*
