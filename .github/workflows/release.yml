@@ -64,7 +64,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           file "dist/agent-gc-${{ matrix.platform }}"
-          file "dist/agent-gc-${{ matrix.platform }}" | grep -Eq 'static(-pie)? linked'
+          file "dist/agent-gc-${{ matrix.platform }}" | grep -Eq 'statically linked|static-pie linked'
       - uses: actions/upload-artifact@v5
         with:
           name: bin-${{ matrix.platform }}

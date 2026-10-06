@@ -17,3 +17,6 @@ walkdir = "2"
 [[bin]]
 name = "ag"
 path = "src/bin/ag.rs"
+
+[profile.release]
+strip = true
