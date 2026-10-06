@@ -1,10 +1,19 @@
 name: Release
 
 # v* 태그 push → 6개 플랫폼 빌드·테스트 → npm 패키지 조립 → 각 OS에서 설치 검증 → npm/GitHub Release 배포.
-# workflow_dispatch(publish=false)는 배포 없이 전체 파이프라인을 리허설한다.
+# 릴리스 관련 파일을 바꾸는 PR과 workflow_dispatch(publish=false)는 배포 없이 전체 파이프라인을 리허설한다.
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".cargo/**"
+      - "bin/**"
+      - "scripts/**"
+      - "package.json"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
     inputs:
       publish:
